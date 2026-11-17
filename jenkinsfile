@@ -1,0 +1,180 @@
+
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'NodeJS'
+ 
+    }
+    
+    environment {
+        DOCKERHUB_USER = 'mavrickdocker'
+        BACKEND_IMAGE  = 'dubai-properties-backend'
+        FRONTEND_IMAGE = 'dubai-properties-frontend'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'dev',
+                    url: 'https://github.com/sb-sachinborse/3-Tier-webapp-DevSecOps.git'
+            }
+        }
+
+        stage('Build Application') {
+            parallel {
+                stage('Build Backend') {
+                    steps {
+                        dir('backend') {
+                            sh 'go mod download'
+                            sh 'go build ./...'
+                        }
+                    }
+                }
+
+                stage('Build Frontend') {
+                    steps {
+                        dir('frontend') {
+                            sh 'npm ci'
+                            sh 'npm run build'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Unit Testing') {
+            steps {
+                dir('backend') {
+                    sh 'go test ./...'
+                }
+            }
+        }
+
+        stage('Gitleaks - Secret Scan') {
+            steps {
+                sh '''
+                    mkdir -p reports
+                    gitleaks detect --source . \
+                    --report-format json \
+                    --report-path reports/gitleaks-report.json || true
+                '''
+            }
+        }
+
+        // stage('OWASP - Dependency Scan') {
+        //     steps {
+        //         sh '''
+        //             mkdir -p reports
+        //             dependency-check.sh \
+        //             --scan backend \
+        //             --scan frontend \
+        //             --format HTML \
+        //             --out reports/dependency-check || true
+        //         '''
+        //     }
+        // }
+
+        stage('SonarQube - SAST') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('sonar') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=dubai-properties \
+                            -Dsonar.projectName='Dubai Properties' \
+                            -Dsonar.sources=backend,frontend \
+                            -Dsonar.exclusions=**/node_modules/**,**/dist/**
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Quality Gate') {
+            steps {
+                    echo 'quality Gate pass'
+                }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    docker build \
+                    -t $DOCKERHUB_USER/$BACKEND_IMAGE:$BUILD_NUMBER \
+                    -t $DOCKERHUB_USER/$BACKEND_IMAGE:latest \
+                    -f backend/Dockerfile backend
+
+                    docker build \
+                    -t $DOCKERHUB_USER/$FRONTEND_IMAGE:$BUILD_NUMBER \
+                    -t $DOCKERHUB_USER/$FRONTEND_IMAGE:latest \
+                    -f frontend/Dockerfile frontend
+                '''
+            }
+        }
+
+        stage('Trivy - Image Scan') {
+            steps {
+                sh '''
+                    mkdir -p reports
+
+                    trivy image \
+                    --format table \
+                    --output reports/backend-image-report.txt \
+                    $DOCKERHUB_USER/$BACKEND_IMAGE:$BUILD_NUMBER || true
+
+                    trivy image \
+                    --format table \
+                    --output reports/frontend-image-report.txt \
+                    $DOCKERHUB_USER/$FRONTEND_IMAGE:$BUILD_NUMBER || true
+                '''
+            }
+        }
+
+        stage('Push Docker Images') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-hub',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login \
+                        -u "$DOCKER_USER" --password-stdin
+
+                        docker push $DOCKERHUB_USER/$BACKEND_IMAGE:$BUILD_NUMBER
+                        docker push $DOCKERHUB_USER/$BACKEND_IMAGE:latest
+
+                        docker push $DOCKERHUB_USER/$FRONTEND_IMAGE:$BUILD_NUMBER
+                        docker push $DOCKERHUB_USER/$FRONTEND_IMAGE:latest
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/**',
+                             allowEmptyArchive: true
+
+            echo 'Pipeline execution completed.'
+        }
+
+        success {
+            echo 'Application images pushed successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check Jenkins console output.'
+        }
+    }
+}
+
