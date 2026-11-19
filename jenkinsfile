@@ -4,13 +4,17 @@ pipeline {
 
     tools {
         nodejs 'NodeJS'
- 
     }
-    
+
     environment {
         DOCKERHUB_USER = 'mavrickdocker'
         BACKEND_IMAGE  = 'dubai-properties-backend'
         FRONTEND_IMAGE = 'dubai-properties-frontend'
+
+        GCP_PROJECT   = 'project-a70c7f47-e201-489a-87f'
+        GKE_CLUSTER   = 'dubai-properties-gke'
+        GKE_ZONE      = 'us-central1-a'
+        K8S_NAMESPACE = 'dubai-properties'
     }
 
     stages {
@@ -63,19 +67,6 @@ pipeline {
             }
         }
 
-        // stage('OWASP - Dependency Scan') {
-        //     steps {
-        //         sh '''
-        //             mkdir -p reports
-        //             dependency-check.sh \
-        //             --scan backend \
-        //             --scan frontend \
-        //             --format HTML \
-        //             --out reports/dependency-check || true
-        //         '''
-        //     }
-        // }
-
         stage('SonarQube - SAST') {
             steps {
                 script {
@@ -96,8 +87,8 @@ pipeline {
 
         stage('SonarQube Quality Gate') {
             steps {
-                    echo 'quality Gate pass'
-                }
+                echo 'Quality Gate placeholder - real check not configured yet'
+            }
         }
 
         stage('Docker Build') {
@@ -144,6 +135,9 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -e
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
+
                         echo "$DOCKER_PASSWORD" | docker login \
                         -u "$DOCKER_USER" --password-stdin
 
@@ -152,10 +146,79 @@ pipeline {
 
                         docker push $DOCKERHUB_USER/$FRONTEND_IMAGE:$BUILD_NUMBER
                         docker push $DOCKERHUB_USER/$FRONTEND_IMAGE:latest
-
-                        docker logout
                     '''
                 }
+            }
+        }
+
+        stage('GKE Authentication') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Connecting to GKE..."
+
+                    gcloud container clusters get-credentials "$GKE_CLUSTER" \
+                        --zone "$GKE_ZONE" \
+                        --project "$GCP_PROJECT"
+
+                    echo "Current Kubernetes context:"
+                    kubectl config current-context
+
+                    echo "Checking deployment permissions..."
+
+                    kubectl auth can-i patch deployments -n "$K8S_NAMESPACE" \
+                        | grep -qx yes
+
+                    kubectl auth can-i get pods -n "$K8S_NAMESPACE" \
+                        | grep -qx yes
+
+                    echo "GKE authentication and permission checks passed."
+                '''
+            }
+        }
+
+        stage('Deploy to GKE') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Deploying backend image..."
+
+                    kubectl set image deployment/backend \
+                        backend="$DOCKERHUB_USER/$BACKEND_IMAGE:$BUILD_NUMBER" \
+                        -n "$K8S_NAMESPACE"
+
+                    echo "Deploying frontend image..."
+
+                    kubectl set image deployment/frontend \
+                        frontend="$DOCKERHUB_USER/$FRONTEND_IMAGE:$BUILD_NUMBER" \
+                        -n "$K8S_NAMESPACE"
+                '''
+            }
+        }
+
+        stage('GKE Rollout Verification') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Waiting for backend rollout..."
+
+                    kubectl rollout status deployment/backend \
+                        -n "$K8S_NAMESPACE" --timeout=180s
+
+                    echo "Waiting for frontend rollout..."
+
+                    kubectl rollout status deployment/frontend \
+                        -n "$K8S_NAMESPACE" --timeout=180s
+
+                    echo "Current application pods:"
+
+                    kubectl get pods -n "$K8S_NAMESPACE" -o wide
+
+                    echo "GKE deployment completed successfully!"
+                '''
             }
         }
     }
@@ -169,7 +232,7 @@ pipeline {
         }
 
         success {
-            echo 'Application images pushed successfully!'
+            echo 'Application images pushed and deployment completed successfully!'
         }
 
         failure {
