@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: dubai-properties
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: mavrickdocker/dubai-properties-backend:18
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+          env:
+            - name: MONGO_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secret
+                  key: MONGO_ROOT_USERNAME
+            - name: MONGO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secret
+                  key: MONGO_ROOT_PASSWORD
+            - name: MONGO_URI
+              value: "mongodb://$(MONGO_ROOT_USERNAME):$(MONGO_ROOT_PASSWORD)@mongo:27017/?authSource=admin"
+            - name: MONGO_DATABASE
+              value: "dubai_properties"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: JWT_SECRET
+            - name: PORT
+              value: "8081"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 20
